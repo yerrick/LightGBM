@@ -3,6 +3,7 @@
 
 #include <LightGBM/utils/random.h>
 #include <LightGBM/utils/text_reader.h>
+#include <LightGBM/utils/openmp_wrapper.h>
 
 #include <LightGBM/meta.h>
 #include <LightGBM/config.h>
@@ -34,7 +35,7 @@ class DatasetLoader;
 */
 class Metadata {
 public:
- /*!
+  /*!
   * \brief Null costructor
   */
   Metadata();
@@ -47,7 +48,7 @@ public:
   /*!
   * \brief init as subset
   * \param metadata Filename of data
-  * \param used_indices 
+  * \param used_indices
   * \param num_used_indices
   */
   void Init(const Metadata& metadata, const data_size_t* used_indices, data_size_t num_used_indices);
@@ -79,7 +80,7 @@ public:
   * \param used_data_indices Indices of local used training data
   */
   void CheckOrPartition(data_size_t num_all_data,
-    const std::vector<data_size_t>& used_data_indices);
+                        const std::vector<data_size_t>& used_data_indices);
 
   void SetLabel(const float* label, data_size_t len);
 
@@ -155,12 +156,12 @@ public:
 
   /*!
   * \brief Get data boundaries on queries, if not exists, will return nullptr
-  *        we assume data will order by query, 
+  *        we assume data will order by query,
   *        the interval of [query_boundaris[i], query_boundaris[i+1])
   *        is the data indices for query i.
   * \return Pointer of data boundaries on queries
   */
-  inline const data_size_t* query_boundaries() const { 
+  inline const data_size_t* query_boundaries() const {
     if (!query_boundaries_.empty()) {
       return query_boundaries_.data();
     } else {
@@ -178,7 +179,7 @@ public:
   * \brief Get weights for queries, if not exists, will return nullptr
   * \return Pointer of weights for queries
   */
-  inline const float* query_weights() const { 
+  inline const float* query_weights() const {
     if (!query_weights_.empty()) {
       return query_weights_.data();
     } else {
@@ -190,7 +191,7 @@ public:
   * \brief Get initial scores, if not exists, will return nullptr
   * \return Pointer of initial scores
   */
-  inline const double* init_score() const { 
+  inline const double* init_score() const {
     if (!init_score_.empty()) {
       return init_score_.data();
     } else {
@@ -261,7 +262,7 @@ public:
   * \param out_label Label will store to this if exists
   */
   virtual void ParseOneLine(const char* str,
-    std::vector<std::pair<int, double>>* out_features, double* out_label) const = 0;
+                            std::vector<std::pair<int, double>>* out_features, double* out_label) const = 0;
 
   /*!
   * \brief Create a object of parser, will auto choose the format depend on file
@@ -286,7 +287,8 @@ public:
 
   void Construct(
     std::vector<std::unique_ptr<BinMapper>>& bin_mappers,
-    const std::vector<std::vector<int>>& sample_non_zero_indices,
+    int** sample_non_zero_indices,
+    const int* num_per_col,
     size_t total_sample_cnt,
     const IOConfig& io_config);
 
@@ -353,6 +355,9 @@ public:
   inline int Feture2SubFeature(int feature_idx) const {
     return feature2subfeature_[feature_idx];
   }
+  inline uint64_t GroupBinBoundary(int group_idx) const {
+    return group_bin_boundaries_[group_idx];
+  }
   inline uint64_t NumTotalBin() const {
     return group_bin_boundaries_.back();
   }
@@ -384,23 +389,22 @@ public:
 
   LIGHTGBM_EXPORT void CreateValid(const Dataset* dataset);
 
-  void ConstructHistograms(
-    const std::vector<int8_t>& is_feature_used,
-    const data_size_t* data_indices, data_size_t num_data,
-    int leaf_idx,
-    std::vector<std::unique_ptr<OrderedBin>>& ordered_bins,
-    const score_t* gradients, const score_t* hessians,
-    score_t* ordered_gradients, score_t* ordered_hessians,
-    HistogramBinEntry* histogram_data) const;
+  void ConstructHistograms(const std::vector<int8_t>& is_feature_used,
+                           const data_size_t* data_indices, data_size_t num_data,
+                           int leaf_idx,
+                           std::vector<std::unique_ptr<OrderedBin>>& ordered_bins,
+                           const score_t* gradients, const score_t* hessians,
+                           score_t* ordered_gradients, score_t* ordered_hessians,
+                           bool is_constant_hessian,
+                           HistogramBinEntry* histogram_data) const;
 
   void FixHistogram(int feature_idx, double sum_gradient, double sum_hessian, data_size_t num_data,
-    HistogramBinEntry* data) const;
+                    HistogramBinEntry* data) const;
 
-  inline data_size_t Split(
-    int feature,
-    uint32_t threshold,
-    data_size_t* data_indices, data_size_t num_data,
-    data_size_t* lte_indices, data_size_t* gt_indices) const {
+  inline data_size_t Split(int feature,
+                           uint32_t threshold,
+                           data_size_t* data_indices, data_size_t num_data,
+                           data_size_t* lte_indices, data_size_t* gt_indices) const {
     const int group = feature2group_[feature];
     const int sub_feature = feature2subfeature_[feature];
     return feature_groups_[group]->Split(sub_feature, threshold, data_indices, num_data, lte_indices, gt_indices);
@@ -418,13 +422,26 @@ public:
   inline int FeatureNumBin(int i) const {
     const int group = feature2group_[i];
     const int sub_feature = feature2subfeature_[i];
-	  return feature_groups_[group]->bin_mappers_[sub_feature]->num_bin();
+    return feature_groups_[group]->bin_mappers_[sub_feature]->num_bin();
   }
   
+  inline int FeatureGroupNumBin(int group) const {
+    return feature_groups_[group]->num_total_bin_;
+  }
+
   inline const BinMapper* FeatureBinMapper(int i) const {
     const int group = feature2group_[i];
     const int sub_feature = feature2subfeature_[i];
     return feature_groups_[group]->bin_mappers_[sub_feature].get();
+  }
+
+  inline const Bin* FeatureBin(int i) const {
+    const int group = feature2group_[i];
+    return feature_groups_[group]->bin_data_.get();
+  }
+  
+  inline const Bin* FeatureGroupBin(int group) const {
+    return feature_groups_[group]->bin_data_.get();
   }
 
   inline BinIterator* FeatureIterator(int i) const {
@@ -433,6 +450,10 @@ public:
     return feature_groups_[group]->SubFeatureIterator(sub_feature);
   }
 
+  inline BinIterator* FeatureGroupIterator(int group) const {
+    return feature_groups_[group]->FeatureGroupIterator();
+  }
+  
   inline double RealThreshold(int i, uint32_t threshold) const {
     const int group = feature2group_[i];
     const int sub_feature = feature2subfeature_[i];
@@ -441,10 +462,14 @@ public:
 
   inline void CreateOrderedBins(std::vector<std::unique_ptr<OrderedBin>>* ordered_bins) const {
     ordered_bins->resize(num_groups_);
-#pragma omp parallel for schedule(guided)
+    OMP_INIT_EX();
+    #pragma omp parallel for schedule(guided)
     for (int i = 0; i < num_groups_; ++i) {
-       ordered_bins->at(i).reset(feature_groups_[i]->bin_data_->CreateOrderedBin());
+      OMP_LOOP_EX_BEGIN();
+      ordered_bins->at(i).reset(feature_groups_[i]->bin_data_->CreateOrderedBin());
+      OMP_LOOP_EX_END();
     }
+    OMP_THROW_EX();
   }
 
   /*!
@@ -455,6 +480,9 @@ public:
 
   /*! \brief Get Number of used features */
   inline int num_features() const { return num_features_; }
+
+  /*! \brief Get Number of feature groups */
+  inline int num_feature_groups() const { return num_groups_;}
 
   /*! \brief Get Number of total features */
   inline int num_total_features() const { return num_total_features_; }
@@ -511,6 +539,8 @@ private:
   Metadata metadata_;
   /*! \brief index of label column */
   int label_idx_ = 0;
+  /*! \brief Threshold for treating a feature as a sparse feature */
+  double sparse_threshold_;
   /*! \brief store feature names */
   std::vector<std::string> feature_names_;
   /*! \brief store feature names */

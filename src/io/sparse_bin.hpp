@@ -38,10 +38,11 @@ public:
     Reset(start_idx);
   }
 
-  inline VAL_T RawGet(data_size_t idx);
+  inline uint32_t RawGet(data_size_t idx) override;
+  inline VAL_T InnerRawGet(data_size_t idx);
 
   inline uint32_t Get( data_size_t idx) override {
-    VAL_T ret = RawGet(idx);
+    VAL_T ret = InnerRawGet(idx);
     if (ret >= min_bin_ && ret <= max_bin_) {
       return ret - min_bin_ + bias_;
     } else {
@@ -103,6 +104,24 @@ public:
     Log::Fatal("Using OrderedSparseBin->ConstructHistogram() instead");
   }
 
+  void ConstructHistogram(data_size_t, const score_t*,
+                          const score_t*, HistogramBinEntry*) const override {
+    // Will use OrderedSparseBin->ConstructHistogram() instead
+    Log::Fatal("Using OrderedSparseBin->ConstructHistogram() instead");
+  }
+
+  void ConstructHistogram(const data_size_t*, data_size_t, const score_t*,
+                          HistogramBinEntry*) const override {
+    // Will use OrderedSparseBin->ConstructHistogram() instead
+    Log::Fatal("Using OrderedSparseBin->ConstructHistogram() instead");
+  }
+
+  void ConstructHistogram(data_size_t, const score_t*,
+                          HistogramBinEntry*) const override {
+    // Will use OrderedSparseBin->ConstructHistogram() instead
+    Log::Fatal("Using OrderedSparseBin->ConstructHistogram() instead");
+  }
+
   inline bool NextNonzero(data_size_t* i_delta,
     data_size_t* cur_pos) const {
     ++(*i_delta);
@@ -146,7 +165,7 @@ public:
       }
       for (data_size_t i = 0; i < num_data; ++i) {
         const data_size_t idx = data_indices[i];
-        VAL_T bin = iterator.RawGet(idx);
+        VAL_T bin = iterator.InnerRawGet(idx);
         if (bin > maxb || bin < minb) {
           default_indices[(*default_count)++] = idx;
         } else if (bin > th) {
@@ -162,7 +181,7 @@ public:
       }
       for (data_size_t i = 0; i < num_data; ++i) {
         const data_size_t idx = data_indices[i];
-        VAL_T bin = iterator.RawGet(idx);
+        VAL_T bin = iterator.InnerRawGet(idx);
         if (bin > maxb || bin < minb) {
           default_indices[(*default_count)++] = idx;
         } else if (bin != th) {
@@ -321,7 +340,7 @@ public:
     // transform to delta array
     data_size_t last_idx = 0;
     for (data_size_t i = 0; i < num_used_indices; ++i) {
-      VAL_T bin = iterator.RawGet(used_indices[i]);
+      VAL_T bin = iterator.InnerRawGet(used_indices[i]);
       if (bin > 0) {
         data_size_t cur_delta = i - last_idx;
         while (cur_delta >= 256) {
@@ -357,7 +376,12 @@ protected:
 };
 
 template <typename VAL_T>
-inline VAL_T SparseBinIterator<VAL_T>::RawGet(data_size_t idx) {
+inline uint32_t SparseBinIterator<VAL_T>::RawGet(data_size_t idx) {
+  return InnerRawGet(idx);
+}
+
+template <typename VAL_T>
+inline VAL_T SparseBinIterator<VAL_T>::InnerRawGet(data_size_t idx) {
   while (cur_pos_ < idx) {
     bin_data_->NextNonzero(&i_delta_, &cur_pos_);
   }

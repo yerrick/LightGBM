@@ -74,7 +74,7 @@ int Tree::Split(int leaf, int feature, BinType bin_type, uint32_t threshold_bin,
   }
   threshold_in_bin_[new_node_idx] = threshold_bin;
   threshold_[new_node_idx] = threshold_double;
-  split_gain_[new_node_idx] = gain;
+  split_gain_[new_node_idx] = gain == std::numeric_limits<double>::infinity() ? std::numeric_limits<double>::max() : gain;
   // add two new leaves
   left_child_[new_node_idx] = ~leaf;
   right_child_[new_node_idx] = ~num_leaves_;
@@ -84,9 +84,9 @@ int Tree::Split(int leaf, int feature, BinType bin_type, uint32_t threshold_bin,
   // save current leaf value to internal node before change
   internal_value_[new_node_idx] = leaf_value_[leaf];
   internal_count_[new_node_idx] = left_cnt + right_cnt;
-  leaf_value_[leaf] = left_value;
+  leaf_value_[leaf] = std::isnan(left_value) ? 0.0f : left_value;
   leaf_count_[leaf] = left_cnt;
-  leaf_value_[num_leaves_] = right_value;
+  leaf_value_[num_leaves_] = std::isnan(right_value) ? 0.0f : right_value;
   leaf_count_[num_leaves_] = right_cnt;
   // update leaf depth
   leaf_depth_[num_leaves_] = leaf_depth_[leaf] + 1;
@@ -318,6 +318,7 @@ std::string Tree::ToString() {
   str_buf << "internal_count="
     << Common::ArrayToString<data_size_t>(internal_count_, num_leaves_ - 1, ' ') << std::endl;
   str_buf << "shrinkage=" << shrinkage_ << std::endl;
+  str_buf << "has_categorical=" << (has_categorical_ ? 1 : 0) << std::endl;
   str_buf << std::endl;
   return str_buf.str();
 }
@@ -327,6 +328,7 @@ std::string Tree::ToJSON() {
   str_buf << std::setprecision(std::numeric_limits<double>::digits10 + 2);
   str_buf << "\"num_leaves\":" << num_leaves_ << "," << std::endl;
   str_buf << "\"shrinkage\":" << shrinkage_ << "," << std::endl;
+  str_buf << "\"has_categorical\":" << (has_categorical_ ? 1 : 0) << "," << std::endl;
   str_buf << "\"tree_structure\":" << NodeToJSON(0) << std::endl;
 
   return str_buf.str();
@@ -375,32 +377,94 @@ Tree::Tree(const std::string& str) {
       }
     }
   }
-  if (key_vals.count("num_leaves") <= 0 || key_vals.count("split_feature") <= 0
-    || key_vals.count("split_gain") <= 0 || key_vals.count("threshold") <= 0
-    || key_vals.count("left_child") <= 0 || key_vals.count("right_child") <= 0
-    || key_vals.count("leaf_parent") <= 0 || key_vals.count("leaf_value") <= 0
-    || key_vals.count("internal_value") <= 0 || key_vals.count("internal_count") <= 0
-    || key_vals.count("leaf_count") <= 0 || key_vals.count("shrinkage") <= 0
-    || key_vals.count("decision_type") <= 0
-    ) {
-    Log::Fatal("Tree model string format error");
+  if (key_vals.count("num_leaves") <= 0) {
+    Log::Fatal("Tree model should contain num_leaves field.");
   }
 
   Common::Atoi(key_vals["num_leaves"].c_str(), &num_leaves_);
 
-  left_child_ = Common::StringToArray<int>(key_vals["left_child"], ' ', num_leaves_ - 1);
-  right_child_ = Common::StringToArray<int>(key_vals["right_child"], ' ', num_leaves_ - 1);
-  split_feature_ = Common::StringToArray<int>(key_vals["split_feature"], ' ', num_leaves_ - 1);
-  threshold_ = Common::StringToArray<double>(key_vals["threshold"], ' ', num_leaves_ - 1);
-  decision_type_ = Common::StringToArray<int8_t>(key_vals["decision_type"], ' ', num_leaves_ - 1);
-  split_gain_ = Common::StringToArray<double>(key_vals["split_gain"], ' ', num_leaves_ - 1);
-  internal_count_ = Common::StringToArray<data_size_t>(key_vals["internal_count"], ' ', num_leaves_ - 1);
-  internal_value_ = Common::StringToArray<double>(key_vals["internal_value"], ' ', num_leaves_ - 1);
+  if (num_leaves_ <= 1) { return; }
 
-  leaf_count_ = Common::StringToArray<data_size_t>(key_vals["leaf_count"], ' ', num_leaves_);
-  leaf_parent_ = Common::StringToArray<int>(key_vals["leaf_parent"], ' ', num_leaves_);
-  leaf_value_ = Common::StringToArray<double>(key_vals["leaf_value"], ' ', num_leaves_);
-  Common::Atof(key_vals["shrinkage"].c_str(), &shrinkage_);
+  if (key_vals.count("left_child")) {
+    left_child_ = Common::StringToArray<int>(key_vals["left_child"], ' ', num_leaves_ - 1);
+  } else {
+    Log::Fatal("Tree model string format error, should contain left_child field");
+  }
+
+  if (key_vals.count("right_child")) {
+    right_child_ = Common::StringToArray<int>(key_vals["right_child"], ' ', num_leaves_ - 1);
+  } else {
+    Log::Fatal("Tree model string format error, should contain right_child field");
+  }
+
+  if (key_vals.count("split_feature")) {
+    split_feature_ = Common::StringToArray<int>(key_vals["split_feature"], ' ', num_leaves_ - 1);
+  } else {
+    Log::Fatal("Tree model string format error, should contain split_feature field");
+  }
+
+  if (key_vals.count("threshold")) {
+    threshold_ = Common::StringToArray<double>(key_vals["threshold"], ' ', num_leaves_ - 1);
+  } else {
+    Log::Fatal("Tree model string format error, should contain threshold field");
+  }
+
+  if (key_vals.count("leaf_value")) {
+    leaf_value_ = Common::StringToArray<double>(key_vals["leaf_value"], ' ', num_leaves_);
+  } else {
+    Log::Fatal("Tree model string format error, should contain leaf_value field");
+  }
+
+  if (key_vals.count("split_gain")) {
+    split_gain_ = Common::StringToArray<double>(key_vals["split_gain"], ' ', num_leaves_ - 1);
+  } else {
+    split_gain_.resize(num_leaves_ - 1);
+  }
+
+  if (key_vals.count("internal_count")) {
+    internal_count_ = Common::StringToArray<data_size_t>(key_vals["internal_count"], ' ', num_leaves_ - 1);
+  } else {
+    internal_count_.resize(num_leaves_ - 1);
+  }
+
+  if (key_vals.count("internal_value")) {
+    internal_value_ = Common::StringToArray<double>(key_vals["internal_value"], ' ', num_leaves_ - 1);
+  } else {
+    internal_value_.resize(num_leaves_ - 1);
+  }
+
+  if (key_vals.count("leaf_count")) {
+    leaf_count_ = Common::StringToArray<data_size_t>(key_vals["leaf_count"], ' ', num_leaves_);
+  } else {
+    leaf_count_.resize(num_leaves_);
+  }
+
+  if (key_vals.count("leaf_parent")) {
+    leaf_parent_ = Common::StringToArray<int>(key_vals["leaf_parent"], ' ', num_leaves_);
+  } else {
+    leaf_parent_.resize(num_leaves_);
+  }
+
+  if (key_vals.count("decision_type")) {
+    decision_type_ = Common::StringToArray<int8_t>(key_vals["decision_type"], ' ', num_leaves_ - 1);
+  } else {
+    decision_type_ = std::vector<int8_t>(num_leaves_ - 1, 0);
+  }
+
+  if (key_vals.count("shrinkage")) {
+    Common::Atof(key_vals["shrinkage"].c_str(), &shrinkage_);
+  } else {
+    shrinkage_ = 1.0f;
+  }
+
+  if (key_vals.count("has_categorical")) {
+    int t = 0;
+    Common::Atoi(key_vals["has_categorical"].c_str(), &t);
+    has_categorical_ = t > 0;
+  } else {
+    has_categorical_ = false;
+  }
+
 }
 
 }  // namespace LightGBM

@@ -59,7 +59,6 @@ public:
   explicit BinMapper(const void* memory);
   ~BinMapper();
 
-  static double kSparseThreshold;
   bool CheckAlign(const BinMapper& other) const {
     if (num_bin_ != other.num_bin_) {
       return false;
@@ -124,13 +123,14 @@ public:
   /*!
   * \brief Construct feature value to bin mapper according feature values
   * \param values (Sampled) values of this feature, Note: not include zero. 
+  * \param num_values number of values.
   * \param total_sample_cnt number of total sample count, equal with values.size() + num_zeros
   * \param max_bin The maximal number of bin
   * \param min_data_in_bin min number of data in one bin
   * \param min_split_data
   * \param bin_type Type of this bin
   */
-  void FindBin(std::vector<double>& values, size_t total_sample_cnt, int max_bin, int min_data_in_bin, int min_split_data, BinType bin_type);
+  void FindBin(double* values, int num_values, size_t total_sample_cnt, int max_bin, int min_data_in_bin, int min_split_data, BinType bin_type);
 
   /*!
   * \brief Use specific number of bin to calculate the size of this class
@@ -227,6 +227,16 @@ public:
     const score_t* hessians, HistogramBinEntry* out) const = 0;
 
   /*!
+  * \brief Construct histogram by using this bin
+  *        Note: Unlike Bin, OrderedBin doesn't use ordered gradients and ordered hessians.
+  *        Because it is hard to know the relative index in one leaf for sparse bin, since we skipped zero bins.
+  * \param leaf Using which leaf's data to construct
+  * \param gradients Gradients, Note:non-oredered by leaf
+  * \param out Output Result
+  */
+  virtual void ConstructHistogram(int leaf, const score_t* gradients, HistogramBinEntry* out) const = 0;
+
+  /*!
   * \brief Split current bin, and perform re-order by leaf
   * \param leaf Using which leaf's to split
   * \param right_leaf The new leaf index after perform this split
@@ -247,6 +257,7 @@ public:
   * \return Bin data
   */
   virtual uint32_t Get(data_size_t idx) = 0;
+  virtual uint32_t RawGet(data_size_t idx) = 0;
   virtual void Reset(data_size_t idx) = 0;
   virtual ~BinIterator() = default;
 };
@@ -322,6 +333,28 @@ public:
     const score_t* ordered_gradients, const score_t* ordered_hessians,
     HistogramBinEntry* out) const = 0;
 
+  virtual void ConstructHistogram(data_size_t num_data,
+    const score_t* ordered_gradients, const score_t* ordered_hessians,
+    HistogramBinEntry* out) const = 0;
+
+  /*!
+  * \brief Construct histogram of this feature,
+  *        Note: We use ordered_gradients and ordered_hessians to improve cache hit chance
+  *        The naive solution is using gradients[data_indices[i]] for data_indices[i] to get gradients,
+  which is not cache friendly, since the access of memory is not continuous.
+  *        ordered_gradients and ordered_hessians are preprocessed, and they are re-ordered by data_indices.
+  *        Ordered_gradients[i] is aligned with data_indices[i]'s gradients (same for ordered_hessians).
+  * \param data_indices Used data indices in current leaf
+  * \param num_data Number of used data
+  * \param ordered_gradients Pointer to gradients, the data_indices[i]-th data's gradient is ordered_gradients[i]
+  * \param out Output Result
+  */
+  virtual void ConstructHistogram(const data_size_t* data_indices, data_size_t num_data,
+                                  const score_t* ordered_gradients, HistogramBinEntry* out) const = 0;
+
+  virtual void ConstructHistogram(data_size_t num_data,
+                                  const score_t* ordered_gradients, HistogramBinEntry* out) const = 0;
+
   /*!
   * \brief Split data according to threshold, if bin <= threshold, will put into left(lte_indices), else put into right(gt_indices)
   * \param min_bin min_bin of current used feature
@@ -357,12 +390,13 @@ public:
   * \param num_bin Number of bin
   * \param sparse_rate Sparse rate of this bins( num_bin0/num_data )
   * \param is_enable_sparse True if enable sparse feature
+  * \param sparse_threshold Threshold for treating a feature as a sparse feature
   * \param is_sparse Will set to true if this bin is sparse
   * \param default_bin Default bin for zeros value
   * \return The bin data object
   */
   static Bin* CreateBin(data_size_t num_data, int num_bin,
-    double sparse_rate, bool is_enable_sparse, bool* is_sparse);
+    double sparse_rate, bool is_enable_sparse, double sparse_threshold, bool* is_sparse);
 
   /*!
   * \brief Create object for bin data of one feature, used for dense feature
